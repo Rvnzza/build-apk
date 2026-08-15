@@ -1,0 +1,283 @@
+name: Web2Apk
+
+on:
+  workflow_dispatch:
+    inputs:
+      web_url:
+        description: Website URL
+        required: true
+        type: string
+      app_name:
+        description: Application name
+        required: true
+        type: string
+      icon_url:
+        description: Application icon URL
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    env:
+      FLUTTER_VERSION: "3.47.0"
+      JAVA_VERSION: "17"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.47.0"
+          channel: stable
+          cache: true
+
+      - name: Create Flutter Project
+        env:
+          APP_NAME: ${{ inputs.app_name }}
+        run: |
+          set -e
+
+          NAME=$(echo "$APP_NAME" \
+            | tr '[:upper:]' '[:lower:]' \
+            | sed 's/[^a-z0-9_]/_/g' \
+            | sed 's/^[0-9]/app_/')
+
+          if [ -z "$NAME" ]; then
+            NAME="web_to_apk"
+          fi
+
+          flutter create \
+            --platforms=android \
+            --project-name "$NAME" \
+            web_to_apk
+
+      - name: Configure WebView
+        env:
+          WEB_URL: ${{ inputs.web_url }}
+        run: |
+          set -e
+
+          cd web_to_apk
+
+          flutter pub add webview_flutter
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+
+          url = os.environ["WEB_URL"]
+
+          main = f'''import 'package:flutter/material.dart';
+          import 'package:webview_flutter/webview_flutter.dart';
+
+          void main() {{
+            WidgetsFlutterBinding.ensureInitialized();
+            runApp(const WebToApkApp());
+          }}
+
+          class WebToApkApp extends StatefulWidget {{
+            const WebToApkApp({{super.key}});
+
+            @override
+            State<WebToApkApp> createState() => _WebToApkAppState();
+          }}
+
+          class _WebToApkAppState extends State<WebToApkApp> {{
+            late final WebViewController controller;
+
+            @override
+            void initState() {{
+              super.initState();
+
+              controller = WebViewController()
+                ..setJavaScriptMode(JavaScriptMode.unrestricted)
+                ..setNavigationDelegate(
+                  NavigationDelegate(
+                    onWebResourceError: (error) {{
+                      debugPrint(error.description);
+                    }},
+                  ),
+                )
+                ..loadRequest(Uri.parse({url!r}));
+            }}
+
+            @override
+            Widget build(BuildContext context) {{
+              return MaterialApp(
+                debugShowCheckedModeBanner: false,
+                home: Scaffold(
+                  body: SafeArea(
+                    child: WebViewWidget(
+                      controller: controller,
+                    ),
+                  ),
+                ),
+              );
+            }}
+          }}
+          '''
+
+          Path("lib/main.dart").write_text(main)
+
+      - name: Configure Android
+        run: |
+          set -e
+
+          cd web_to_apk
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("android/app/src/main/AndroidManifest.xml")
+          text = p.read_text()
+
+          permission = '    <uses-permission android:name="android.permission.INTERNET" />'
+
+          if "android.permission.INTERNET" not in text:
+              marker = '<application'
+              if marker in text:
+                  text = text.replace(
+                      marker,
+                      permission + "\n\n    " + marker,
+                      1
+                  )
+              else:
+                  raise SystemExit("Tag application tidak ditemukan")
+
+          p.write_text(text)
+          PY
+
+          sed -n '1,80p' android/app/src/main/AndroidManifest.xml
+
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+
+          ET.parse("android/app/src/main/AndroidManifest.xml")
+
+          print("AndroidManifest.xml valid")
+          PY
+
+      - name: Download Icon
+        env:
+          ICON_URL: ${{ inputs.icon_url }}
+        run: |
+          set -e
+
+          mkdir -p web_to_apk/assets
+
+          curl \
+            --location \
+            --fail \
+            --retry 5 \
+            --retry-delay 2 \
+            --connect-timeout 30 \
+            --max-time 120 \
+            -A "FlutterBuildBot/1.0" \
+            "$ICON_URL" \
+            --output web_to_apk/assets/icon.png
+
+          test -s web_to_apk/assets/icon.png
+
+          file web_to_apk/assets/icon.png
+
+      - name: Configure Launcher Icon
+        run: |
+          set -e
+
+          cd web_to_apk
+
+          flutter pub add --dev flutter_launcher_icons
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import yaml
+
+          p = Path("pubspec.yaml")
+          data = yaml.safe_load(p.read_text()) or {}
+
+          data["flutter_launcher_icons"] = {
+              "android": True,
+              "ios": False,
+              "image_path": "assets/icon.png",
+              "min_sdk_android": 21
+          }
+
+          class Dumper(yaml.SafeDumper):
+              pass
+
+          Dumper.ignore_aliases = lambda self, data: True
+
+          p.write_text(
+              yaml.safe_dump(
+                  data,
+                  sort_keys=False,
+                  allow_unicode=True,
+                  default_flow_style=False
+              )
+          )
+          PY
+
+          echo "===== PUBSPEC ====="
+          cat pubspec.yaml
+
+          echo "===== ICON ====="
+          file assets/icon.png
+
+          flutter pub get
+
+          dart run flutter_launcher_icons -f pubspec.yaml
+
+      - name: Build APK
+        run: |
+          set -e
+
+          cd web_to_apk
+
+          flutter clean
+          flutter pub get
+
+          flutter build apk \
+            --release \
+            --android-skip-build-dependency-validation
+
+      - name: Verify APK
+        run: |
+          set -e
+
+          APK="web_to_apk/build/app/outputs/flutter-apk/app-release.apk"
+
+          if [ ! -f "$APK" ]; then
+            echo "APK tidak ditemukan."
+
+            find web_to_apk/build \
+              -type f \
+              -name "*.apk" \
+              -print \
+              2>/dev/null || true
+
+            exit 1
+          fi
+
+          ls -lh "$APK"
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web2apk-${{ github.run_number }}
+          path: web_to_apk/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+          retention-days: 7
