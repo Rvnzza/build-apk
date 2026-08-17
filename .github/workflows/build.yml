@@ -25,10 +25,6 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
-    env:
-      FLUTTER_VERSION: "3.47.0"
-      JAVA_VERSION: "17"
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -44,7 +40,6 @@ jobs:
         with:
           channel: stable
           cache: true
-
 
       - name: Download Project
         env:
@@ -283,14 +278,16 @@ jobs:
 
           mkdir -p android/gradle/wrapper
 
-          cat > android/gradle/wrapper/gradle-wrapper.properties <<'EOF'
-          distributionBase=GRADLE_USER_HOME
-          distributionPath=wrapper/dists
-          distributionUrl=https\://services.gradle.org/distributions/gradle-8.14-bin.zip
-          networkTimeout=120000
-          zipStoreBase=GRADLE_USER_HOME
-          zipStorePath=wrapper/dists
-          EOF
+          if [ ! -f "android/gradle/wrapper/gradle-wrapper.properties" ]; then
+            cat > android/gradle/wrapper/gradle-wrapper.properties <<'EOF'
+distributionBase=GRADLE_USER_HOME
+distributionPath=wrapper/dists
+distributionUrl=https\://services.gradle.org/distributions/gradle-8.5-bin.zip
+networkTimeout=120000
+zipStoreBase=GRADLE_USER_HOME
+zipStorePath=wrapper/dists
+EOF
+          fi
 
           if [ -f android/gradlew ]; then
             chmod +x android/gradlew
@@ -342,7 +339,7 @@ jobs:
           BUILD_TYPE: ${{ inputs.build_type }}
           BUILD_TAG: ${{ inputs.tag }}
         run: |
-          set -e
+          set +e
 
           cd "$PROJECT_DIR"
 
@@ -354,23 +351,25 @@ jobs:
           flutter clean
           flutter pub get
 
+          BUILD_FLAGS="--target=$ENTRY_POINT --android-skip-build-dependency-validation"
+
           if [ "$BUILD_TYPE" = "debug" ]; then
-            flutter build apk \
-              --debug \
-              --target="$ENTRY_POINT" \
-              --android-skip-build-dependency-validation
-
+            flutter build apk --debug $BUILD_FLAGS > build_apk.log 2>&1
           elif [ "$BUILD_TYPE" = "profile" ]; then
-            flutter build apk \
-              --profile \
-              --target="$ENTRY_POINT" \
-              --android-skip-build-dependency-validation
-
+            flutter build apk --profile $BUILD_FLAGS > build_apk.log 2>&1
           else
-            flutter build apk \
-              --release \
-              --target="$ENTRY_POINT" \
-              --android-skip-build-dependency-validation
+            flutter build apk --release $BUILD_FLAGS > build_apk.log 2>&1
+          fi
+
+          STATUS=$?
+
+          echo "[RESULT_BUILD_APK]"
+          cat build_apk.log
+          echo "[END_RESULT_BUILD_APK]"
+
+          if [ "$STATUS" -ne 0 ]; then
+            echo "Build APK gagal."
+            exit $STATUS
           fi
 
       - name: Verify APK
